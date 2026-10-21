@@ -102,6 +102,7 @@ if not selected:
 
 rows = []
 problems = []
+all_tracked = []  # per-shipment ping data of tracked shipments, for pooled overall stats
 
 for f in files:
     try:
@@ -135,11 +136,20 @@ for f in files:
             or find_col(df, "shipper name", contains=["shipper"])
         )
 
+        pings_col = find_col(df, "latency updates received", contains=["updates", "received"])
+        interval_col = find_col(df, "ping interval min", contains=["ping", "interval"])
+        if pings_col is None:
+            problems.append(f"{f.name} [{sheet_name}]: ping count column ('Latency Updates Received') not found - ping stats blank")
+        if interval_col is None:
+            problems.append(f"{f.name} [{sheet_name}]: 'Ping Interval (min)' column not found - interval stats blank")
+
         d = pd.DataFrame(
             {
                 "Customer": df[customer_col].astype(str).str.strip() if customer_col else "(not in file)",
                 "Carrier": df[carrier_col].astype(str).str.strip() if carrier_col else "(not in file)",
                 "tracked": to_bool(df[tracked_col]),
+                "pings": pd.to_numeric(df[pings_col], errors="coerce") if pings_col else float("nan"),
+                "interval": pd.to_numeric(df[interval_col], errors="coerce") if interval_col else float("nan"),
             }
         )
         complete = pd.Series(True, index=df.index)
@@ -147,12 +157,14 @@ for f in files:
             complete &= has_value(df[col])
         d["complete"] = complete & d["tracked"]
         d["File"] = f.name
+        all_tracked.append(d[d["tracked"]][["pings", "interval"]])
 
         for (cust, carr), g in d.groupby(["Customer", "Carrier"], dropna=False):
             total = len(g)
             tracked = int(g["tracked"].sum())
             untracked = total - tracked
             comp = int(g["complete"].sum())
+            gt = g[g["tracked"]]  # ping stats only for tracked shipments
             rows.append(
                 {
                     "File": f.name,
@@ -165,6 +177,10 @@ for f in files:
                     "Untracked %": round(untracked / total * 100, 2) if total else 0.0,
                     "Milestone Complete (of tracked)": comp,
                     "Milestone Completeness %": round(comp / tracked * 100, 2) if tracked else 0.0,
+                    "Avg Ping Interval (min)": round(gt["interval"].mean(), 2),
+                    "Median Ping Interval (min)": round(gt["interval"].median(), 2),
+                    "Avg Pings / Shipment": round(gt["pings"].mean(), 2),
+                    "Median Pings / Shipment": round(gt["pings"].median(), 2),
                 }
             )
 
@@ -195,6 +211,24 @@ c4.metric(
 )
 st.caption("Milestones counted: " + ", ".join(selected))
 
+# Ping stats are pooled over all tracked shipments (not an average of per-row averages)
+pool = pd.concat(all_tracked) if all_tracked else pd.DataFrame(columns=["pings", "interval"])
+
+
+def fmt(x):
+    return "n/a" if pd.isna(x) else f"{x:,.2f}"
+
+
+p1, p2, p3, p4 = st.columns(4)
+p1.metric("Avg Ping Interval (min)", fmt(pool["interval"].mean()))
+p2.metric("Median Ping Interval (min)", fmt(pool["interval"].median()))
+p3.metric("Avg Pings / Shipment", fmt(pool["pings"].mean()))
+p4.metric("Median Pings / Shipment", fmt(pool["pings"].median()))
+st.caption(
+    "Ping stats cover tracked shipments only. Pings = 'Latency Updates Received'; "
+    "ping interval = 'Ping Interval (min)' (shipments with a blank interval are excluded from interval stats)."
+)
+
 # ---------------- Per carrier table ----------------
 st.subheader("By file / customer / carrier")
 st.dataframe(
@@ -205,6 +239,10 @@ st.dataframe(
         "Tracked %": st.column_config.NumberColumn(format="%.2f%%"),
         "Untracked %": st.column_config.NumberColumn(format="%.2f%%"),
         "Milestone Completeness %": st.column_config.NumberColumn(format="%.2f%%"),
+        "Avg Ping Interval (min)": st.column_config.NumberColumn(format="%.2f"),
+        "Median Ping Interval (min)": st.column_config.NumberColumn(format="%.2f"),
+        "Avg Pings / Shipment": st.column_config.NumberColumn(format="%.2f"),
+        "Median Pings / Shipment": st.column_config.NumberColumn(format="%.2f"),
     },
 )
 
