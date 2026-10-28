@@ -268,14 +268,16 @@ for fname, sheet_name, df, L in sheets_loaded:
 
     d = pd.DataFrame(
         {
-            "Customer": df[customer_col].astype(str).str.strip().values if customer_col else "(not in file)",
-            "Carrier": df[carrier_col].astype(str).str.strip().values if carrier_col else "(not in file)",
+            "Customer": df[customer_col].map(clean_val).values if customer_col else "(not in file)",
+            "Carrier": df[carrier_col].map(clean_val).values if carrier_col else "(not in file)",
             "tracked": to_bool(df[tracked_col]).values,
             "pings": pd.to_numeric(df[pings_col], errors="coerce").values if pings_col else np.nan,
             "interval": pd.to_numeric(df[interval_col], errors="coerce").values if interval_col else np.nan,
         }
     )
     present = pd.DataFrame({label: has_value(df[col]).values for label, col in ms_cols.items()})
+    for label in selected:
+        d[f"ms_{label}"] = present[label].values
     d["ms_received"] = present.sum(axis=1).values
     d["complete"] = present.all(axis=1).values & d["tracked"].values
     all_tracked.append(d[d["tracked"]][["pings", "interval"]])
@@ -303,6 +305,11 @@ for fname, sheet_name, df, L in sheets_loaded:
                 "Milestones Received": ms_got,
                 "Milestones Expected": ms_exp,
                 "Milestone Achieved %": round(ms_got / ms_exp * 100, 2) if ms_exp else 0.0,
+                **{
+                    f"{label} %": round(gt[f"ms_{label}"].sum() / tracked * 100, 2) if tracked else 0.0
+                    for label in selected
+                },
+                **{f"_{label} n": int(gt[f"ms_{label}"].sum()) for label in selected},
                 "Avg Ping Interval (min)": round(gt["interval"].mean(), 2),
                 "Median Ping Interval (min)": round(gt["interval"].median(), 2),
                 "Avg Pings / Shipment": round(gt["pings"].mean(), 2),
@@ -328,7 +335,7 @@ if not rows:
     st.warning("No shipments left after filtering." if active_filters else "Nothing to show.")
     st.stop()
 
-res = pd.DataFrame(rows)
+res = pd.DataFrame(rows).sort_values(["File", "Total Shipments"], ascending=[True, False])
 
 # ---------------- Overall summary ----------------
 tot = res["Total Shipments"].sum()
@@ -359,6 +366,17 @@ c5.metric(
 )
 st.caption("Milestones counted: " + ", ".join(selected))
 
+# Per-milestone achieved: share of tracked shipments that received each selected milestone
+mcols = st.columns(len(selected))
+for col, label in zip(mcols, selected):
+    n = res[f"_{label} n"].sum()
+    col.metric(
+        f"{label} %",
+        f"{n / trk * 100:.2f}%" if trk else "0.00%",
+        f"{n:,} of {trk:,} tracked",
+        delta_color="off",
+    )
+
 # Ping stats are pooled over all tracked shipments (not an average of per-row averages)
 pool = pd.concat(all_tracked) if all_tracked else pd.DataFrame(columns=["pings", "interval"])
 
@@ -381,8 +399,9 @@ st.caption(
 st.subheader("By file / customer / carrier")
 pct = st.column_config.NumberColumn(format="%.2f%%")
 num = st.column_config.NumberColumn(format="%.2f")
+show = res.drop(columns=[c for c in res.columns if c.startswith("_")])
 st.dataframe(
-    res,
+    show,
     width="stretch",
     hide_index=True,
     column_config={
@@ -390,6 +409,7 @@ st.dataframe(
         "Untracked %": pct,
         "Milestone Completeness %": pct,
         "Milestone Achieved %": pct,
+        **{f"{label} %": pct for label in selected},
         "Avg Ping Interval (min)": num,
         "Median Ping Interval (min)": num,
         "Avg Pings / Shipment": num,
@@ -399,7 +419,7 @@ st.dataframe(
 
 buf = io.BytesIO()
 with pd.ExcelWriter(buf, engine="openpyxl") as w:
-    res.to_excel(w, index=False, sheet_name="Summary")
+    show.to_excel(w, index=False, sheet_name="Summary")
 st.download_button(
     "Download table as Excel",
     buf.getvalue(),
